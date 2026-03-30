@@ -1,0 +1,612 @@
+from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException, Response, Cookie, Request, BackgroundTasks
+from fastapi.responses import StreamingResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pymongo import MongoClient
+from bson import ObjectId
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+from gtts import gTTS
+from io import BytesIO
+import gridfs, os, secrets, random, requests
+from datetime import datetime
+import bcrypt
+import string
+from mutagen.mp3 import MP3
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+
+from pdf_utils import get_intelligent_text, get_chapters
+from send_email import send_otp_email, send_welcome_email, send_password_email, send_password_update_email
+
+# ------------------ LOAD ENV ------------------
+load_dotenv()
+
+# MongoDB setup
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI)
+db = client["lysn"]
+users = db["users"]
+audio_metadata = db["audio_metadata"]
+# Ensure unique index on (user, filename) to prevent duplicates per user
+try:
+    audio_metadata.create_index([("user", 1), ("filename", 1)], unique=True)
+    print("✓ Indexing check complete: unique constraint on (user, filename) enforced.")
+except Exception as e:
+    print(f"Warning: Could not create unique index on audio_metadata: {e}")
+
+sessions = db["sessions"]
+fs = gridfs.GridFS(db)
+
+# ------------------ HELPERS ------------------
+def get_kolkata_time():
+    """Returns the current time in Kolkata (UTC+5:30)"""
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+# Google OAuth
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
+
+# Initialize SlowAPI rate limiter
+limiter = Limiter(key_func=get_remote_address)
+app = FastAPI(title="Lysn 🎧")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Get allowed origins (comma separated)
+ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+def get_cookie_settings(origin: str):
+    """Determine cookie settings based on the request origin."""
+    is_https = origin and origin.startswith("https://")
+    return {
+        "httponly": True,
+        "max_age": 7 * 24 * 60 * 60,
+        "samesite": "none" if is_https else "lax",
+        "secure": is_https,
+    }
+
+# ------------------ PASSWORD UTILS ------------------
+def hash_password(password: str):
+    # bcrypt supports max 72 bytes
+    encoded = password.encode("utf-8")
+    if len(encoded) > 72:
+        encoded = encoded[:72]
+    
+    # Generate salt and hash
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(encoded, salt)
+    return hashed.decode("utf-8")
+
+def verify_password(plain_password: str, hashed_password: str):
+    try:
+        # Check password
+        if not hashed_password:
+            return False
+            
+        # Ensure bytes
+        if isinstance(hashed_password, str):
+            hashed_password = hashed_password.encode("utf-8")
+            
+        plain_encoded = plain_password.encode("utf-8")
+        if len(plain_encoded) > 72:
+            plain_encoded = plain_encoded[:72]
+            
+        return bcrypt.checkpw(plain_encoded, hashed_password)
+    except Exception as e:
+        print(f"Password verification errored: {e}")
+        return False
+
+def generate_temp_password(length=12):
+    chars = string.ascii_letters + string.digits + "!@#$%^&*()"
+    return ''.join(secrets.choice(chars) for _ in range(length))
+
+# ------------------ IN-MEMORY STORAGE ------------------
+OTPS = {}      # { email: { "otp": str, "expires_at": datetime, "name": str } }
+
+# ------------------ DATABASE SESSIONS ------------------
+SESSION_TIMEOUT = timedelta(days=7)
+
+def create_session(email: str):
+    token = secrets.token_urlsafe(32)
+    sessions.update_one(
+        {"email": email},
+        {"$set": {
+            "token": token,
+            "last_active": get_kolkata_time()
+        }},
+        upsert=True
+    )
+    return token
+
+def get_current_user(session_token: str = Cookie(None)):
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Not logged in")
+
+    session = sessions.find_one({"token": session_token})
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    # Check expiration
+    if get_kolkata_time() - session["last_active"] > SESSION_TIMEOUT:
+        sessions.delete_one({"token": session_token})
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    # Extend session activity (sliding expiration)
+    sessions.update_one(
+        {"token": session_token},
+        {"$set": {"last_active": get_kolkata_time()}}
+    )
+    return session["email"]
+
+def logout_user(session_token: str):
+    if session_token:
+        sessions.delete_one({"token": session_token})
+
+# ------------------ HELPERS ------------------
+def generate_otp():
+    return str(random.randint(100000, 999999))
+
+# ------------------ ROUTES ------------------
+@app.get("/")
+def root():
+    return {"message": "Welcome to Lysn 🎧"}
+
+@app.get("/healthz")
+async def health_check():
+    return {"message": "Lysn is active!", "status": "OK"}
+
+# ---------- AUTHENTICATION : MANUAL ----------
+@app.post("/auth/otp/request")
+def request_otp(background_tasks: BackgroundTasks, email: str = Form(...), name: str = Form(None)):
+    otp = generate_otp()
+    expires_at = get_kolkata_time() + timedelta(minutes=5)
+
+    # Store in memory only
+    OTPS[email] = {
+        "otp": otp,
+        "expires_at": expires_at,
+        "name": name
+    }
+
+    background_tasks.add_task(send_otp_email, email, otp, name)
+    return {"message": f"OTP sent to {email}"}
+
+
+@app.post("/auth/otp/verify")
+def verify_otp(background_tasks: BackgroundTasks, request: Request, response: Response, email: str = Form(...), otp: str = Form(...), name: str = Form(None)):
+    otp_data = OTPS.get(email)
+    
+    if not otp_data or otp_data["otp"] != otp:
+        # Invalidate OTP on wrong attempt too? User said "immediately invalid" 
+        # but usually it's after use. Let's stick to strict invalidation if found.
+        if otp_data:
+            del OTPS[email]
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+        
+    if get_kolkata_time() > otp_data["expires_at"]:
+        del OTPS[email]
+        raise HTTPException(status_code=401, detail="OTP expired")
+
+    # If valid, immediately invalidate
+    del OTPS[email]
+
+    # Check if user exists
+    existing_user = users.find_one({"email": email})
+    is_new_user = not existing_user
+
+    token = create_session(email)
+    
+    update_fields = {
+        "name": name if name else (existing_user.get("name") if existing_user else otp_data.get("name", "")),
+        "auth_type": "manual",
+        "profile_pic": (existing_user.get("profile_pic") if existing_user else f"https://api.dicebear.com/9.x/identicon/svg?seed={email}"),
+        "updated_at": get_kolkata_time(),
+    }
+
+    if is_new_user:
+        temp_password = generate_temp_password()
+        update_fields["password"] = hash_password(temp_password)
+        update_fields["created_at"] = get_kolkata_time()
+        
+        display_name = (name or otp_data.get("name") or email.split('@')[0]).title()
+        background_tasks.add_task(send_welcome_email, email, display_name)
+        background_tasks.add_task(send_password_email, email, display_name, temp_password)
+
+    users.update_one(
+        {"email": email},
+        {"$set": update_fields},
+        upsert=True,
+    )
+
+    origin = request.headers.get("origin") or (ALLOWED_ORIGINS[0] if ALLOWED_ORIGINS else "http://localhost:3000")
+    cookie_settings = get_cookie_settings(origin)
+
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        **cookie_settings
+    )
+
+    return {"message": "OTP verified", "email": email, "name": update_fields["name"]}
+
+
+@app.post("/auth/login")
+def login(request: Request, response: Response, email: str = Form(...), password: str = Form(...)):
+    user = users.find_one({"email": email})
+    if not user or not verify_password(password, user.get("password", "")):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_session(email)
+    origin = request.headers.get("origin") or (ALLOWED_ORIGINS[0] if ALLOWED_ORIGINS else "http://localhost:3000")
+    cookie_settings = get_cookie_settings(origin)
+
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        **cookie_settings
+    )
+    return {"message": "Login successful", "email": email, "name": user.get("name", "")}
+
+@app.post("/auth/set-password")
+def set_password(
+    background_tasks: BackgroundTasks,
+    email: str = Depends(get_current_user),
+    old_password: str = Form(...),
+    new_password: str = Form(...)
+):
+    user = users.find_one({"email": email})
+    if not user or not verify_password(old_password, user.get("password", "")):
+        raise HTTPException(status_code=401, detail="Old password incorrect")
+
+    users.update_one(
+        {"email": email},
+        {"$set": {"password": hash_password(new_password), "updated_at": get_kolkata_time()}}
+    )
+
+    # send confirmation email
+    try:
+        background_tasks.add_task(send_password_update_email, email, user.get("name"))
+    except Exception as e:
+        print(f"Failed to send password update email: {e}")
+
+    return {"message": "Password updated successfully"}
+
+@app.post("/auth/password/reset")
+def reset_password(background_tasks: BackgroundTasks, email: str = Form(...)):
+    user = users.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    otp = generate_otp()
+    expires_at = get_kolkata_time() + timedelta(minutes=5)
+
+    OTPS[email] = {
+        "otp": otp,
+        "expires_at": expires_at,
+        "name": user.get("name", email.split("@")[0].title())
+    }
+
+    # send OTP mail for password reset
+    background_tasks.add_task(send_otp_email, email, otp, user.get("name", email.split("@")[0].title()))
+
+    return {"message": f"OTP sent to {email} for password reset"}
+
+@app.post("/auth/password/reset/verify")
+def verify_reset_password(background_tasks: BackgroundTasks, email: str = Form(...), otp: str = Form(...), new_password: str = Form(None)):
+    otp_data = OTPS.get(email)
+    
+    if not otp_data or otp_data["otp"] != otp:
+        # Invalidate OTP on wrong attempt? Keeping it simple for now as per previous logic
+        # If we invalidate immediately on wrong attempt, it prevents brute forcing but might be annoying.
+        # Let's clean up only if it exists to prevent probing?
+        if otp_data:
+            del OTPS[email]
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+
+    if get_kolkata_time() > otp_data["expires_at"]:
+        del OTPS[email]
+        raise HTTPException(status_code=401, detail="OTP expired")
+
+    # If new_password is provided, update the password and consume the OTP
+    if new_password:
+        users.update_one(
+            {"email": email},
+            {"$set": {"password": hash_password(new_password), "updated_at": get_kolkata_time()}}
+        )
+        del OTPS[email]
+        
+        # Send confirmation email
+        user = users.find_one({"email": email})
+        try:
+            background_tasks.add_task(send_password_update_email, email, user.get("name"))
+        except Exception:
+            pass
+            
+        return {"message": "Password reset successfully"}
+    
+    # If no new_password, just verify (OTP is valid)
+    # DO NOT delete OTP here, so the next call with new_password can succeed.
+    # However, to prevent replay attacks or reuse, robust systems use a temp token.
+    # Given the constraints, we rely on the OTP remaining valid until used for reset or expired.
+    return {"message": "OTP verified"}
+
+# ---------- AUTHENTICATION : GOOGLE ----------
+@app.get("/auth/google/login")
+def google_login(origin: str = None):
+    # Use origin as state to maintain context through the OAuth flow
+    state = origin or ALLOWED_ORIGINS[0]
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        "?response_type=code"
+        f"&client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}"
+        "&scope=openid email profile"
+        f"&state={state}"
+    )
+    return RedirectResponse(auth_url)
+
+@app.get("/auth/google/callback")
+def google_callback(background_tasks: BackgroundTasks, response: Response, code: str, state: str = None):
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri": REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+    r = requests.post(token_url, data=data).json()
+    access_token = r.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Google login failed")
+
+    userinfo = requests.get(
+        "https://www.googleapis.com/oauth2/v1/userinfo",
+        params={"access_token": access_token},
+    ).json()
+
+    email = userinfo.get("email")
+    name = userinfo.get("name")
+    profile_pic = userinfo.get("picture")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Cannot get email")
+    
+    # Check if user already exists
+    existing_user = users.find_one({"email": email})
+
+    token = create_session(email)
+    users.update_one(
+        {"email": email},
+        {
+            "$set": {
+                "name": name,
+                "email": email,
+                "auth_type": "google",
+                "profile_pic": profile_pic,
+                "updated_at": get_kolkata_time(),
+            },
+            "$setOnInsert": {"created_at": get_kolkata_time()},
+        },
+        upsert=True,
+    )
+
+    # Send welcome email only for new Google signups
+    if not existing_user:
+        try:
+            background_tasks.add_task(send_welcome_email, email, name)
+        except Exception as e:
+            print(f"Failed to send welcome email to {email}: {e}")
+
+    # Determine redirect URL based on content of state or referrer? 
+    # For now, we need to know where the user came from. 
+    # Since Google Auth flow is a redirect, we might lose the 'Referer' header.
+    # A robust way is to pass 'state' param with the origin.
+    # PROPLEM: We aren't using 'state' yet.
+    # FALLBACK: We can't easily know in this specific endpoint without 'state'.
+    # We will assume the first HTTPS origin if available, else the first allowed origin.
+    
+    # Determine target origin from state (passed in google_login)
+    # Strip trailing slash for comparison
+    clean_state = (state or "").rstrip("/")
+    target_origin = clean_state if clean_state in ALLOWED_ORIGINS else ALLOWED_ORIGINS[0]
+    
+    # If state isn't a known origin, try to find the production one if this is a secure request
+    if target_origin not in ALLOWED_ORIGINS and len(ALLOWED_ORIGINS) > 1:
+        # Prefer HTTPS if available
+        for o in ALLOWED_ORIGINS:
+            if o.startswith("https://"):
+                target_origin = o
+                break
+
+    # Redirect to the home page on the target origin
+    redirect_res = RedirectResponse(f"{target_origin}/")
+    
+    # Determine cookie settings based on target_origin
+    cookie_settings = get_cookie_settings(target_origin)
+    
+    redirect_res.set_cookie(
+        key="session_token",
+        value=token,
+        **cookie_settings,
+    )
+    return redirect_res
+
+@app.get("/auth/me")
+def get_user_info(email: str = Depends(get_current_user)):
+    user = users.find_one({"email": email}, {"_id": 0})
+    return {"user": user}
+
+@app.post("/auth/logout")
+def logout(response: Response, session_token: str = Cookie(None)):
+    logout_user(session_token)
+    response.delete_cookie("session_token")
+    return {"message": "Logged out successfully"}
+
+# ---------- PDF → AUDIO ----------
+@app.post("/pdf/upload")
+@limiter.limit("5/minute")
+def upload_pdf(request: Request, file: UploadFile = File(...), email: str = Depends(get_current_user)):
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF allowed")
+
+    # Preserve filename (remove .pdf and add .mp3)
+    base_name = os.path.splitext(file.filename)[0]
+    audio_filename = f"{base_name}.mp3"
+    
+    # Check if audio with same filename already exists for this user
+    existing_audio = audio_metadata.find_one({"user": email, "filename": audio_filename})
+    if existing_audio:
+        raise HTTPException(
+            status_code=409, 
+            detail=f"File '{audio_filename}' already exists in your library. Please delete the previous file or rename this one before uploading."
+        )
+
+    # Use the Mega-Request Pipeline: Vision + Chapters + Quiz (ONE REQUEST)
+    from pdf_utils import process_pdf_mega_request
+    full_data = process_pdf_mega_request(file.file)
+
+    # Combine text from all chapters into a single long string for gTTS
+    full_text = "\n".join([c.get("content", "") for c in full_data])
+
+    if not full_text.strip():
+        raise HTTPException(status_code=400, detail="PDF has no readable text. If this is a scanned document, please ensure Tesseract OCR is installed.")
+
+    tts = gTTS(text=full_text, lang="en")
+    audio_buffer = BytesIO()
+    tts.write_to_fp(audio_buffer)
+    audio_buffer.seek(0)
+
+    # Store audio in GridFS
+    audio_id = fs.put(audio_buffer, filename=audio_filename, user=email)
+    
+    # Calculate duration from the generated MP3
+    audio_buffer.seek(0)
+    try:
+        audio_info = MP3(audio_buffer)
+        duration_seconds = audio_info.info.length
+    except Exception:
+        duration_seconds = 0  # Fallback if duration can't be calculated
+    
+    audio_metadata.insert_one({
+        "user": email, 
+        "audio_id": audio_id, 
+        "filename": audio_filename,
+        "duration": duration_seconds,
+        "chapters": full_data, # This now includes: Title, Summary, Content, and QUIZ!
+        "uploaded": get_kolkata_time()
+    })
+
+    return {"message": "Audio generated with Chapters and Quiz", "audio_id": str(audio_id), "duration": duration_seconds, "chapters": len(full_data)}
+
+@app.get("/audio/{audio_id}")
+def get_audio(audio_id: str, request: Request):
+    try:
+        if not ObjectId.is_valid(audio_id):
+            raise HTTPException(status_code=400, detail="Invalid audio ID")
+
+        file = fs.get(ObjectId(audio_id))
+        file_size = file.length
+        
+        range_header = request.headers.get("range")
+        if not range_header:
+            return StreamingResponse(file, media_type="audio/mpeg", headers={"Accept-Ranges": "bytes"})
+            
+        start, end = range_header.replace("bytes=", "").split("-")
+        start = int(start)
+        end = int(end) if end else file_size - 1
+        
+        if start >= file_size:
+            raise HTTPException(status_code=416, detail="Range not satisfiable")
+            
+        chunk_size = end - start + 1
+        file.seek(start)
+        
+        def iterfile():
+            yield file.read(chunk_size)
+            
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(chunk_size),
+        }
+        
+        return StreamingResponse(iterfile(), status_code=206, media_type="audio/mpeg", headers=headers)
+        
+    except gridfs.errors.NoFile:
+        raise HTTPException(status_code=404, detail="Audio not found")
+    except Exception as e:
+        print(f"Error serving audio: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/audios_list")
+def list_audios(email: str = Depends(get_current_user)):
+    records = audio_metadata.find({"user": email})
+    audios = [
+        {
+            "audio_id": str(r["audio_id"]),
+            "filename": r.get("filename", "Untitled Audio"),
+            "duration": r.get("duration", 0),
+            "uploaded": (
+                r["uploaded"].strftime("%Y-%m-%d %H:%M:%S")
+                if isinstance(r["uploaded"], datetime)
+                else str(r["uploaded"])
+            ),
+        }
+        for r in records
+    ]
+    return {"audios": audios}
+
+@app.delete("/audio/{audio_id}")
+def delete_audio(audio_id: str, email: str = Depends(get_current_user)):
+    """Delete audio file from GridFS and metadata from database"""
+    try:
+        # Verify the audio belongs to the user
+        metadata = audio_metadata.find_one({"audio_id": ObjectId(audio_id), "user": email})
+        if not metadata:
+            raise HTTPException(status_code=404, detail="Audio not found or unauthorized")
+        
+        # Delete from GridFS (this removes all chunks automatically)
+        fs.delete(ObjectId(audio_id))
+        
+        # Delete metadata from database
+        audio_metadata.delete_one({"audio_id": ObjectId(audio_id)})
+        
+        return {"message": "Audio deleted successfully", "audio_id": audio_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete audio: {str(e)}")
+
+@app.get("/audio/{audio_id}/metadata")
+def get_audio_metadata(audio_id: str, email: str = Depends(get_current_user)):
+    """Retrieve chapters, summaries, and quiz data for a specific audio file"""
+    try:
+        if not ObjectId.is_valid(audio_id):
+            raise HTTPException(status_code=400, detail="Invalid audio ID")
+        
+        metadata = audio_metadata.find_one({"audio_id": ObjectId(audio_id), "user": email})
+        if not metadata:
+            raise HTTPException(status_code=404, detail="Audio metadata not found or unauthorized")
+        
+        return {
+            "audio_id": str(audio_id),
+            "filename": metadata.get("filename"),
+            "chapters": metadata.get("chapters", []),
+            "duration": metadata.get("duration", 0)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch metadata: {str(e)}")
