@@ -454,62 +454,127 @@ def logout(response: Response, session_token: str = Cookie(None)):
     response.delete_cookie("session_token")
     return {"message": "Logged out successfully"}
 
-# ---------- PDF → AUDIO ----------
+# ---------- PDF → AUDIO (BACKGROUND) ----------
+def process_pdf_background(file_bytes: bytes, filename: str, email: str, metadata_id: ObjectId):
+    """Heavy background task for AI vision extraction + TTS generation"""
+    try:
+        from io import BytesIO
+        from pdf_utils import process_pdf_mega_request
+        from gtts import gTTS
+        from mutagen.mp3 import MP3
+        from bson import ObjectId
+
+        # 1. Mega-Request Pipeline: Vision + Chapters + Quiz
+        file_obj = BytesIO(file_bytes)
+        full_data = process_pdf_mega_request(file_obj)
+
+        # 2. Extract full text for TTS
+        full_text = "\n".join([c.get("content", "") for c in full_data])
+        
+        if not full_text.strip():
+            audio_metadata.update_one({"_id": metadata_id}, {"$set": {"status": "error", "error": "No text extracted"}})
+            return
+
+        # 3. Generate Audio (TTS)
+        tts = gTTS(text=full_text, lang="en")
+        audio_buffer = BytesIO()
+        tts.write_to_fp(audio_buffer)
+        audio_buffer.seek(0)
+
+        # 4. Store in GridFS
+        audio_filename = f"{os.path.splitext(filename)[0]}.mp3"
+        audio_id = fs.put(audio_buffer, filename=audio_filename, user=email)
+
+        # 5. Calculate Duration
+        audio_buffer.seek(0)
+        try:
+            audio_info = MP3(audio_buffer)
+            duration_seconds = audio_info.info.length
+        except Exception:
+            duration_seconds = 0
+
+        # 6. Final Metadata Update
+        audio_metadata.update_one(
+            {"_id": metadata_id},
+            {"$set": {
+                "status": "completed",
+                "audio_id": audio_id,
+                "duration": duration_seconds,
+                "chapters": full_data,
+                "processed_at": get_kolkata_time()
+            }}
+        )
+        print(f"✓ Background Processing Complete: {filename}")
+
+    except Exception as e:
+        print(f"✗ Background Processing Failed: {e}")
+        audio_metadata.update_one({"_id": metadata_id}, {"$set": {"status": "error", "error": str(e)}})
+
 @app.post("/pdf/upload")
 @limiter.limit("5/minute")
-def upload_pdf(request: Request, file: UploadFile = File(...), email: str = Depends(get_current_user)):
+async def upload_pdf(
+    request: Request, 
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...), 
+    email: str = Depends(get_current_user)
+):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF allowed")
 
-    # Preserve filename (remove .pdf and add .mp3)
     base_name = os.path.splitext(file.filename)[0]
     audio_filename = f"{base_name}.mp3"
     
-    # Check if audio with same filename already exists for this user
-    existing_audio = audio_metadata.find_one({"user": email, "filename": audio_filename})
-    if existing_audio:
+    # Check for duplicates
+    if audio_metadata.find_one({"user": email, "filename": audio_filename, "status": {"$ne": "error"}}):
         raise HTTPException(
             status_code=409, 
-            detail=f"File '{audio_filename}' already exists in your library. Please delete the previous file or rename this one before uploading."
+            detail=f"File '{audio_filename}' already exists or is being processed."
         )
 
-    # Use the Mega-Request Pipeline: Vision + Chapters + Quiz (ONE REQUEST)
-    from pdf_utils import process_pdf_mega_request
-    full_data = process_pdf_mega_request(file.file)
-
-    # Combine text from all chapters into a single long string for gTTS
-    full_text = "\n".join([c.get("content", "") for c in full_data])
-
-    if not full_text.strip():
-        raise HTTPException(status_code=400, detail="PDF has no readable text. If this is a scanned document, please ensure Tesseract OCR is installed.")
-
-    tts = gTTS(text=full_text, lang="en")
-    audio_buffer = BytesIO()
-    tts.write_to_fp(audio_buffer)
-    audio_buffer.seek(0)
-
-    # Store audio in GridFS
-    audio_id = fs.put(audio_buffer, filename=audio_filename, user=email)
+    # 1. Read file bytes immediately (to prevent spool file closure)
+    file_bytes = await file.read()
     
-    # Calculate duration from the generated MP3
-    audio_buffer.seek(0)
-    try:
-        audio_info = MP3(audio_buffer)
-        duration_seconds = audio_info.info.length
-    except Exception:
-        duration_seconds = 0  # Fallback if duration can't be calculated
-    
-    audio_metadata.insert_one({
-        "user": email, 
-        "audio_id": audio_id, 
+    # 2. Create Initial Metadata (Status: "processing")
+    metadata_result = audio_metadata.insert_one({
+        "user": email,
         "filename": audio_filename,
-        "duration": duration_seconds,
-        "chapters": full_data, # This now includes: Title, Summary, Content, and QUIZ!
+        "status": "processing",
         "uploaded": get_kolkata_time()
     })
+    
+    # 3. Trigger Background Task
+    background_tasks.add_task(
+        process_pdf_background, 
+        file_bytes, 
+        file.filename, 
+        email, 
+        metadata_result.inserted_id
+    )
 
-    return {"message": "Audio generated with Chapters and Quiz", "audio_id": str(audio_id), "duration": duration_seconds, "chapters": len(full_data)}
+    return {
+        "message": "Upload accepted. Processing in background.",
+        "id": str(metadata_result.inserted_id),
+        "status": "processing"
+    }
 
+@app.get("/audio/status/{metadata_id}")
+def get_processing_status(metadata_id: str, email: str = Depends(get_current_user)):
+    """Check the processing status of a specific PDF-to-Audio task"""
+    if not ObjectId.is_valid(metadata_id):
+        raise HTTPException(status_code=400, detail="Invalid ID")
+    
+    meta = audio_metadata.find_one({"_id": ObjectId(metadata_id), "user": email})
+    if not meta:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    return {
+        "id": metadata_id,
+        "status": meta.get("status"),
+        "audio_id": str(meta.get("audio_id")) if meta.get("audio_id") else None,
+        "error": meta.get("error")
+    }
+
+# ---------- PDF → AUDIO ----------
 @app.get("/audio/{audio_id}")
 def get_audio(audio_id: str, request: Request):
     try:
@@ -552,20 +617,24 @@ def get_audio(audio_id: str, request: Request):
 
 @app.get("/audios_list")
 def list_audios(email: str = Depends(get_current_user)):
-    records = audio_metadata.find({"user": email})
-    audios = [
-        {
-            "audio_id": str(r["audio_id"]),
+    # Sort by upload date (newest first)
+    records = audio_metadata.find({"user": email}).sort("uploaded", -1)
+    audios = []
+    for r in records:
+        audio_data = {
+            "id": str(r["_id"]),
+            "audio_id": str(r.get("audio_id")) if r.get("audio_id") else None,
             "filename": r.get("filename", "Untitled Audio"),
             "duration": r.get("duration", 0),
+            "status": r.get("status", "completed"), # Fallback for old records
+            "error": r.get("error"),
             "uploaded": (
-                r["uploaded"].strftime("%Y-%m-%d %H:%M:%S")
-                if isinstance(r["uploaded"], datetime)
-                else str(r["uploaded"])
+                r["uploaded"].strftime("%B %d, %Y %I:%M %p")
+                if isinstance(r.get("uploaded"), datetime)
+                else str(r.get("uploaded", "Unknown"))
             ),
         }
-        for r in records
-    ]
+        audios.append(audio_data)
     return {"audios": audios}
 
 @app.delete("/audio/{audio_id}")

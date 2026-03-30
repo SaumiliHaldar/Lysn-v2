@@ -65,6 +65,7 @@ export const api = {
     getUrl: (id: string) => `${API_URL}/audio/${id}`,
     getMetadata: (id: string) => fetchAPI(`/audio/${id}/metadata`, { headers: { 'Content-Type': 'application/json' } }),
     delete: (id: string) => fetchAPI(`/audio/${id}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } }),
+    getStatus: (id: string) => fetchAPI(`/audio/status/${id}`, { headers: { 'Content-Type': 'application/json' } }),
   },
   pdf: {
     upload: async (file: File) => {

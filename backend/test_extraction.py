@@ -2,7 +2,7 @@
 # Use: python test_extraction.py
 import os
 import sys
-from pdf_utils import get_intelligent_text
+from pdf_utils import process_pdf_mega_request
 import io
 
 # Ensure backend folder is in path
@@ -16,14 +16,22 @@ def test_on_pdf(filename):
     print(f"--- Starting test on {filename} ---")
     
     with open(filename, "rb") as f:
-        # Pass the file object directly to the function
-        text = get_intelligent_text(f)
+        # Pass the file object directly to the NEW V2 MEGA-REQUEST
+        chapters = process_pdf_mega_request(f)
         
-        print("\n--- EXTRACTED TEXT (FIRST 500 CHARS) ---")
-        if text:
-            print(text[:500] + "...")
+        print("\n--- Lysn V2 EXTRACTION RESULTS ---")
+        if chapters and chapters[0].get("title") != "Error":
+            print(f"✓ Found {len(chapters)} Chapters")
+            for i, c in enumerate(chapters):
+                quiz_count = len(c.get("quiz", []))
+                print(f"  [{i+1}] {c.get('title')} ({len(c.get('content', ''))} chars) | Quiz: {quiz_count} MCQs")
+                if c.get("summary"):
+                    print(f"      Hook: {c.get('summary')}")
+            
+            print("\n--- CONTENT PREVIEW (Chapter 1) ---")
+            print(chapters[0].get("content")[:500] + "...")
         else:
-            print("No text extracted. Check if the PDF is empty or Tesseract is missing.")
+            print("✗ Extraction failed. Check if API Key is set or PDF is unreadable.")
         print("\n--- END TEST ---")
 
 if __name__ == "__main__":

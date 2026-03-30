@@ -56,6 +56,8 @@ export default function DashboardPage() {
   };
 
   const playAudio = (audio: any, index: number) => {
+    if (audio.status !== "completed" || !audio.audio_id) return;
+
     if (currentAudio?.audio_id === audio.audio_id) {
         togglePlay();
         return;
@@ -65,7 +67,11 @@ export default function DashboardPage() {
       ...audio,
       url: api.audio.getUrl(audio.audio_id)
     };
-    playAudioGlobal(audioWithUrl, index, audios.map(a => ({ ...a, url: api.audio.getUrl(a.audio_id) })));
+    const playlist = audios
+      .filter(a => a.status === "completed" && a.audio_id)
+      .map(a => ({ ...a, url: api.audio.getUrl(a.audio_id) }));
+    
+    playAudioGlobal(audioWithUrl, index, playlist);
   };
 
   const handleDelete = (audioId: string, filename: string) => {
@@ -179,53 +185,73 @@ export default function DashboardPage() {
               </div>
             ) : (
               <AnimatePresence mode="popLayout">
-                {audios.map((audio, i) => (
-                  <motion.div
-                    layout
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    transition={{ delay: i * 0.03 }}
-                    key={audio.audio_id}
-                    className="group flex items-center gap-3 sm:gap-4 rounded-2xl border border-border/50 bg-background/50 backdrop-blur-sm p-3 sm:p-4 transition-all hover:bg-secondary/40 hover:shadow-xl hover:border-primary/20"
-                  >
-                    <div className="flex h-10 w-10 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-xl bg-secondary/50 text-muted-foreground transition-all group-hover:bg-primary/20 group-hover:text-primary border border-transparent group-hover:border-primary/20">
-                      <Headphones className="h-4 w-4 sm:h-5 sm:w-5" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold truncate group-hover:text-primary transition-colors">{audio.filename}</p>
-                      <div className="flex items-center gap-2 mt-1">
-                        <Clock className="h-3 w-3 text-muted-foreground/60" />
-                        <span className="text-[10px] text-muted-foreground/60 font-medium uppercase tracking-wider">{audio.uploaded}</span>
+                {audios.map((audio, i) => {
+                  const isProcessing = audio.status === "processing";
+                  const isError = audio.status === "error";
+                  const isReady = audio.status === "completed" && audio.audio_id;
+
+                  return (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      transition={{ delay: i * 0.03 }}
+                      key={audio.id}
+                      className={`group flex items-center gap-3 sm:gap-4 rounded-2xl border border-border/50 bg-background/50 backdrop-blur-sm p-3 sm:p-4 transition-all ${isReady ? 'hover:bg-secondary/40 hover:shadow-xl hover:border-primary/20' : 'opacity-80'}`}
+                    >
+                      <div className={`flex h-10 w-10 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-xl transition-all border border-transparent ${isProcessing ? 'bg-primary/10 text-primary animate-pulse' : isError ? 'bg-destructive/10 text-destructive' : 'bg-secondary/50 text-muted-foreground group-hover:bg-primary/20 group-hover:text-primary group-hover:border-primary/20'}`}>
+                        {isProcessing ? (
+                          <div className="h-4 w-4 sm:h-5 sm:w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                        ) : (
+                          <Headphones className="h-4 w-4 sm:h-5 sm:w-5" />
+                        )}
                       </div>
-                    </div>
-                    <div className="flex items-center gap-1.5 sm:gap-2">
-                      <button
-                        onClick={() => playAudio(audio, i)}
-                        className="flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-xl bg-secondary/50 text-foreground transition-all hover:bg-primary hover:text-white group-hover:scale-105 active:scale-95 shadow-sm"
-                        title={currentAudio?.audio_id === audio.audio_id && isPlaying ? "Pause audio" : "Play audio"}
-                      >
-                        {currentAudio?.audio_id === audio.audio_id && isPlaying ? (
-                          <PauseCircle className="h-4 w-4 sm:h-5 sm:w-5" />
-                        ) : (
-                          <PlayCircle className="h-4 w-4 sm:h-5 sm:w-5" />
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-sm font-semibold truncate transition-colors ${isReady ? 'group-hover:text-primary' : ''}`}>{audio.filename}</p>
+                        <div className="flex items-center gap-2 mt-1">
+                          {isProcessing ? (
+                            <span className="text-[10px] text-primary font-bold animate-pulse uppercase tracking-wider">Processing...</span>
+                          ) : isError ? (
+                            <span className="text-[10px] text-destructive font-bold uppercase tracking-wider">Error: {audio.error || "Failed"}</span>
+                          ) : (
+                            <>
+                              <Clock className="h-3 w-3 text-muted-foreground/60" />
+                              <span className="text-[10px] text-muted-foreground/60 font-medium uppercase tracking-wider">{audio.uploaded}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 sm:gap-2">
+                        {isReady && (
+                          <button
+                            onClick={() => playAudio(audio, i)}
+                            className="flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-xl bg-secondary/50 text-foreground transition-all hover:bg-primary hover:text-white group-hover:scale-105 active:scale-95 shadow-sm"
+                            title={currentAudio?.audio_id === audio.audio_id && isPlaying ? "Pause audio" : "Play audio"}
+                          >
+                            {currentAudio?.audio_id === audio.audio_id && isPlaying ? (
+                              <PauseCircle className="h-4 w-4 sm:h-5 sm:w-5" />
+                            ) : (
+                              <PlayCircle className="h-4 w-4 sm:h-5 sm:w-5" />
+                            )}
+                          </button>
                         )}
-                      </button>
-                      <button
-                        onClick={() => handleDelete(audio.audio_id, audio.filename)}
-                        disabled={deletingId === audio.audio_id}
-                        className="flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-xl bg-secondary/50 text-foreground transition-all hover:bg-destructive hover:text-white group-hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 shadow-sm"
-                        title="Delete audio"
-                      >
-                        {deletingId === audio.audio_id ? (
-                          <div className="h-3 w-3 sm:h-4 sm:w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                        ) : (
-                          <Trash2 className="h-4 w-4" />
-                        )}
-                      </button>
-                    </div>
-                  </motion.div>
-                ))}
+                        <button
+                          onClick={() => isReady ? handleDelete(audio.audio_id, audio.filename) : null}
+                          disabled={deletingId === audio.audio_id || isProcessing}
+                          className="flex h-9 w-9 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-xl bg-secondary/50 text-foreground transition-all hover:bg-destructive hover:text-white group-hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 shadow-sm"
+                          title="Delete audio"
+                        >
+                          {deletingId === audio.audio_id ? (
+                            <div className="h-3 w-3 sm:h-4 sm:w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
+                        </button>
+                      </div>
+                    </motion.div>
+                  );
+                })}
               </AnimatePresence>
             )}
           </div>

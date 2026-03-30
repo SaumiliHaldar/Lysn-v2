@@ -36,13 +36,36 @@ export function UploadZone({ onSuccess }: UploadZoneProps) {
 
   const handleUpload = async (fileToUpload: File) => {
     setStatus("uploading");
+    setLoadingStage(0);
     try {
-      const res = await api.pdf.upload(fileToUpload) as { audio_id: string };
+      // 1. Initial Upload
+      const res = await api.pdf.upload(fileToUpload) as { id: string, status: string };
+      const metadataId = res.id;
+
+      // 2. Poll for status
+      let isCompleted = false;
+      let finalAudioId = "";
+
+      while (!isCompleted) {
+        // Wait 3 seconds between polls
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        const statusRes = await api.audio.getStatus(metadataId) as { status: string, audio_id: string, error?: string };
+        
+        if (statusRes.status === "completed") {
+          isCompleted = true;
+          finalAudioId = statusRes.audio_id;
+        } else if (statusRes.status === "error") {
+          throw new Error(statusRes.error || "Background processing failed");
+        }
+        // If still processing, loop repeats
+      }
+
       setStatus("success");
       toast.success("Audio Generated!", {
         description: `"${fileToUpload.name}" has been converted to audio successfully.`,
       });
-      onSuccess(res.audio_id);
+      onSuccess(finalAudioId);
       setTimeout(() => {
         setFile(null);
         setStatus("idle");
