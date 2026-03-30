@@ -152,12 +152,12 @@ export function AudioPlayer() {
           {/* Header Area */}
           <div className="flex flex-col h-full">
             <div className="p-4 flex items-center justify-between border-b border-border/30">
-                <div className="flex items-center gap-1 p-0.5 bg-secondary/30 rounded-full">
+                <div className="flex items-center gap-1.5 p-1 bg-secondary/30 rounded-full">
                   {(['player', 'chapters', 'quiz'] as const).map((mode) => (
                       <button
                           key={mode}
                           onClick={() => setViewMode(mode)}
-                          className={`px-3 py-1 text-[9px] font-bold uppercase tracking-tighter rounded-full transition-all ${
+                          className={`px-4 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-full transition-all ${
                               viewMode === mode ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
                           }`}
                       >
@@ -204,26 +204,49 @@ export function AudioPlayer() {
                       >
                           <h4 className="text-xs font-bold mb-4 uppercase tracking-widest text-primary">Content Chapters</h4>
                            <div className="space-y-3">
-                               {currentAudio.chapters?.map((chapter: any, i: number) => (
-                                   <div 
-                                       key={i}
-                                       onClick={() => chapter.start_time !== undefined && seek(chapter.start_time)}
-                                       className={`w-full p-3 rounded-xl border border-border/40 bg-secondary/10 group transition-all ${chapter.start_time !== undefined ? 'cursor-pointer hover:border-primary/50 hover:bg-secondary/20' : ''}`}
-                                   >
-                                       <div className="flex items-center justify-between mb-1">
-                                           <div className="flex items-center gap-2">
-                                               <span className="text-[9px] font-bold text-primary/40">0{i+1}</span>
-                                               <h5 className="text-[11px] font-bold">{chapter.title}</h5>
+                               {currentAudio.chapters?.map((chapter: any, i: number) => {
+                                   const chapters = currentAudio.chapters || [];
+                                   const isNextChapterStart = chapters[i+1]?.start_time || duration;
+                                   const isActive = currentTime >= (chapter.start_time || 0) && currentTime < isNextChapterStart;
+                                   
+                                   return (
+                                       <div 
+                                           key={i}
+                                           onClick={() => chapter.start_time !== undefined && seek(chapter.start_time)}
+                                           className={`w-full p-4 rounded-2xl border transition-all ${
+                                               isActive 
+                                                   ? 'border-primary/50 bg-primary/5 ring-1 ring-primary/20' 
+                                                   : 'border-border/40 bg-secondary/5 hover:border-primary/30 hover:bg-secondary/10'
+                                           } ${chapter.start_time !== undefined ? 'cursor-pointer' : ''}`}
+                                       >
+                                           <div className="flex items-center justify-between mb-2">
+                                               <div className="flex items-center gap-2">
+                                                   <span className={`text-[10px] font-bold ${isActive ? 'text-primary' : 'text-primary/30'}`}>
+                                                       {isActive ? '●' : `0${i+1}`}
+                                                   </span>
+                                                   <h5 className={`text-[12px] font-bold ${isActive ? 'text-primary' : 'text-foreground'}`}>
+                                                       {chapter.title}
+                                                   </h5>
+                                                   {isActive && isPlaying && (
+                                                       <motion.div 
+                                                           animate={{ opacity: [0.3, 1, 0.3] }}
+                                                           transition={{ duration: 1.5, repeat: Infinity }}
+                                                           className="px-1.5 py-0.5 rounded-sm bg-primary/10 text-primary text-[8px] font-black uppercase tracking-tighter"
+                                                       >
+                                                           PLAYING
+                                                       </motion.div>
+                                                   )}
+                                               </div>
+                                               {chapter.start_time !== undefined && (
+                                                   <span className="text-[10px] font-medium text-muted-foreground tabular-nums">{formatTime(chapter.start_time)}</span>
+                                               )}
                                            </div>
-                                           {chapter.start_time !== undefined && (
-                                               <span className="text-[9px] font-medium text-muted-foreground tabular-nums">{formatTime(chapter.start_time)}</span>
-                                           )}
+                                           <p className="text-[11px] text-muted-foreground leading-relaxed">
+                                               {chapter.summary}
+                                           </p>
                                        </div>
-                                       <p className="text-[10px] text-muted-foreground leading-relaxed">
-                                           {chapter.summary}
-                                       </p>
-                                   </div>
-                               ))}
+                                   );
+                               })}
                               {(!currentAudio.chapters || currentAudio.chapters.length === 0) && (
                                   <div className="text-center py-12">
                                       <p className="text-[10px] text-muted-foreground">Standard extraction mode (No chapters).</p>
@@ -247,15 +270,20 @@ export function AudioPlayer() {
                                    <motion.div 
                                        initial={{ opacity: 0, scale: 0.9 }}
                                        animate={{ opacity: 1, scale: 1 }}
-                                       className="p-6 rounded-2xl bg-primary text-primary-foreground text-center mb-6 shadow-lg"
+                                       className="p-8 rounded-[2rem] bg-primary text-primary-foreground text-center mb-8 shadow-xl relative overflow-hidden"
                                    >
-                                       <p className="text-[10px] uppercase tracking-widest font-bold mb-1 opacity-80">Your Score</p>
-                                       <h2 className="text-4xl font-black">{calculateScore()}%</h2>
+                                       <div className="absolute top-0 right-0 p-4 opacity-10">
+                                            <Headphones className="h-24 w-24 -rotate-12" />
+                                       </div>
+                                       <p className="text-[10px] uppercase tracking-widest font-black mb-2 opacity-70">
+                                           {calculateScore() >= 80 ? "Mastery Achieved!" : calculateScore() >= 50 ? "Good Progress!" : "Keep Reviewing!"}
+                                       </p>
+                                       <h2 className="text-6xl font-black mb-4">{calculateScore()}%</h2>
                                        <button 
                                            onClick={() => { setShowResults(false); setSelectedAnswers({}); }}
-                                           className="mt-4 px-4 py-2 bg-white text-primary rounded-full text-[10px] font-bold hover:bg-primary-foreground/90 transition-all"
+                                           className="relative z-10 px-6 py-2.5 bg-white text-primary rounded-full text-[11px] font-black hover:scale-105 active:scale-95 transition-all shadow-lg"
                                        >
-                                           RETRY QUIZ
+                                           RETRY CHALLENGE
                                        </button>
                                    </motion.div>
                                )}

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from gtts import gTTS
 from io import BytesIO
-import gridfs, os, secrets, random, requests
+import gridfs, os, secrets, random, requests, hashlib
 from datetime import datetime
 import bcrypt
 import string
@@ -521,28 +521,41 @@ async def upload_pdf(
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF allowed")
 
+    # 1. Read file bytes and calculate hash for caching
+    file_bytes = await file.read()
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    
     base_name = os.path.splitext(file.filename)[0]
     audio_filename = f"{base_name}.mp3"
-    
-    # Check for duplicates
-    if audio_metadata.find_one({"user": email, "filename": audio_filename, "status": {"$ne": "error"}}):
+
+    # 2. Check for DUPLICATE CONTENT (Smart Caching)
+    # If the user has already processed this exact PDF content, reuse it.
+    existing_meta = audio_metadata.find_one({"user": email, "content_hash": file_hash, "status": "completed"})
+    if existing_meta:
+        return {
+            "message": "Content found in cache. Reusing results.",
+            "id": str(existing_meta["_id"]),
+            "audio_id": str(existing_meta.get("audio_id")),
+            "status": "completed"
+        }
+
+    # 3. Check for DUPLICATE FILENAME (Prevent simultaneous processing of same name)
+    if audio_metadata.find_one({"user": email, "filename": audio_filename, "status": "processing"}):
         raise HTTPException(
             status_code=409, 
-            detail=f"File '{audio_filename}' already exists or is being processed."
+            detail=f"A file named '{audio_filename}' is already being processed."
         )
 
-    # 1. Read file bytes immediately (to prevent spool file closure)
-    file_bytes = await file.read()
-    
-    # 2. Create Initial Metadata (Status: "processing")
+    # 4. Create Initial Metadata (Status: "processing")
     metadata_result = audio_metadata.insert_one({
         "user": email,
         "filename": audio_filename,
+        "content_hash": file_hash,
         "status": "processing",
         "uploaded": get_kolkata_time()
     })
     
-    # 3. Trigger Background Task
+    # 5. Trigger Background Task
     background_tasks.add_task(
         process_pdf_background, 
         file_bytes, 

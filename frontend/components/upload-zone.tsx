@@ -39,10 +39,24 @@ export function UploadZone({ onSuccess }: UploadZoneProps) {
     setLoadingStage(0);
     try {
       // 1. Initial Upload
-      const res = await api.pdf.upload(fileToUpload) as { id: string, status: string };
+      const res = await api.pdf.upload(fileToUpload) as { id: string, status: string, audio_id?: string };
       const metadataId = res.id;
 
-      // 2. Poll for status
+      // 1a. Cache hit? Instant success!
+      if (res.status === "completed" && res.audio_id) {
+          setStatus("success");
+          toast.success("Retrieved from Cache", {
+            description: `"${fileToUpload.name}" was previously processed. Reusing audio!`,
+          });
+          onSuccess(res.audio_id);
+          setTimeout(() => {
+            setFile(null);
+            setStatus("idle");
+          }, 2000);
+          return;
+      }
+
+      // 2. Poll for status (only if it wasn't a cache hit)
       let isCompleted = false;
       let finalAudioId = "";
 
