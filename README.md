@@ -1,6 +1,6 @@
 # Lysn
 
-This repository contains the source code for Lysn, an advanced AI-powered platform designed to transform static PDF documents into immersive audio experiences. Integrated with a modern web interface, Lysn delivers high-quality, natural-sounding audio, offering personalized library management and seamless playback controls.
+This repository contains the source code for Lysn, an advanced AI-powered platform designed to transform any PDF documents - whether digital, scanned, or handwritten - into immersive audio experiences. Integrated with a modern web interface, Lysn delivers high-quality, natural-sounding audio with intelligent chapter organization, interactive comprehension quizzes, and seamless playback controls for a complete learning experience.
 
 ## Table of Contents
 
@@ -26,6 +26,11 @@ Lysn is an innovative PDF-to-Audio platform that empowers users to listen to the
 - **Secure Authentication**: Supports both manual email/password login with OTP verification and seamless Google OAuth integration.
 - **Smart Playback**: Stream audio with precision control, including background play, progress tracking, and duration display.
 - **Automated Communication**: Welcome emails and OTPs integrated with Google Apps Script for reliable delivery.
+- **Intelligent Extraction Pipeline**: Automatically detects and processes document types—digital text-searchable PDFs, scanned textbooks, and handwritten notes—through specialized extraction pipelines for optimal accuracy.
+- **AI Chapter Summaries**: Automatically identifies chapters and topics in long PDFs, generating a navigable playlist with AI-powered summaries for each section.
+- **Listen + Quiz Mode**: Interactive comprehension testing with AI-generated multiple-choice questions after each chapter.
+- **Advanced Playback Controls**: Shuffle and repeat modes for flexible listening preferences, plus chapter navigation for non-linear content review.
+- **Smart Caching**: Intelligent caching system avoids redundant processing of previously analyzed documents.
 
 ## Technologies Used
 
@@ -34,7 +39,10 @@ Lysn is an innovative PDF-to-Audio platform that empowers users to listen to the
 - **Next.js (with TypeScript)**: React framework for building a fast, SEO-friendly, and interactive frontend.
 - **MongoDB & GridFS**: NoSQL database for flexible data storage and handling large audio files.
 - **gTTS (Google Text-to-Speech)**: Converts extracted text into high-quality speech.
-- **PyPDF2**: Robust PDF text extraction.
+- **PyPDF2**: Robust PDF text extraction for digital documents.
+- **PyMuPDF (fitz)**: Advanced PDF processing with image extraction capabilities.
+- **Google Gemini Vision API**: AI-powered text extraction and content analysis for complex documents, chapter extraction, and quiz generation.
+- **EasyOCR**: Fallback OCR pipeline for scanned and image-based documents.
 - **Tailwind CSS**: Utility-first CSS framework for stunning, responsive designs.
 - **Framer Motion**: Library for creating smooth, complex animations.
 - **Google Apps Script**: Backend integration for sending automated emails.
@@ -101,11 +109,16 @@ Lysn is an innovative PDF-to-Audio platform that empowers users to listen to the
 
 ## Machine Learning Models
 
+### Text Extraction (Intelligent Pipeline)
+- **Digital Pipeline**: PyPDF2 for fast, structure-preserving extraction from text-searchable PDFs.
+- **OCR Pipeline**: EasyOCR for high-accuracy extraction from scanned documents and clean image-based PDFs.
+- **AI Vision Pipeline**: Google Gemini Vision API for context-aware extraction from handwritten notes, low-resolution images, and complex layouts.
+
 ### Text-to-Speech
 - **gTTS (Google Text-to-Speech)**: Interfaces with Google Translate's text-to-speech API to generate spoken audio data.
 
-### Text Extraction
-- **PyPDF2**: A pure-Python library built as a PDF toolkit for extracting text from PDF files.
+### Content Analysis & Structuring
+- **Gemini Flash Latest**: AI-powered chapter identification, summary generation, and quiz question creation from extracted document content.
 
 ## Contributing
 
