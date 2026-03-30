@@ -1,7 +1,7 @@
 ---
 title: Lysn
 emoji: 🎧
-colorFrom: blue
-colorTo: green
+colorFrom: purple
+colorTo: blue
 sdk: docker
 ---

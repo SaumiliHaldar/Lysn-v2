@@ -167,4 +167,3 @@ def send_password_update_email(to_email: str, name: str = None):
     except Exception as e:
         print(f"Error sending password update email: {e}")
         raise
-
