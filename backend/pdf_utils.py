@@ -9,6 +9,7 @@ from google.genai import types
 from PIL import Image
 from dotenv import load_dotenv
 
+# Load environment variables from .env file
 load_dotenv()
 
 # Silence torch warnings for a cleaner console
