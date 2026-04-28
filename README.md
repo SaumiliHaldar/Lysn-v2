@@ -1,6 +1,6 @@
-# Lysn
+# Lysn - v2
 
-This repository contains the source code for Lysn, an advanced AI-powered platform designed to transform any PDF documents - whether digital, scanned, or handwritten - into immersive audio experiences. Integrated with a modern web interface, Lysn delivers high-quality, natural-sounding audio with intelligent chapter organization, interactive comprehension quizzes, and seamless playback controls for a complete learning experience.
+This repository contains the source code for Lysn, an advanced AI-powered platform designed to transform PDF documents - whether digital, scanned, or handwritten - into immersive audio experiences. Building on the original [Lysn](https://lysn.vercel.app) - this version introduces intelligent document understanding, chapter-based structuring, and interactive learning features, all within a modern web interface.
 
 ## Table of Contents
 
